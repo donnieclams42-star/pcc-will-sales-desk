@@ -1,0 +1,115 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Will sales desk</title>
+  <style>
+    body { margin: 0; font-family: Georgia, serif; background: #f4f7f5; color: #17211c; }
+    main { max-width: 720px; margin: 0 auto; padding: 28px; }
+    form, article { background: white; border-radius: 16px; padding: 18px; margin: 14px 0; }
+    label { display: block; margin: 10px 0; }
+    input, button { font: inherit; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; }
+    button { color: #0f6b4c; background: #e7f3ec; border: 0; border-radius: 999px; padding: 8px 12px; }
+    .muted { color: #5d6b64; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Will sales desk</h1>
+    <p class="muted">Sign in required. This desk shows disposable test leads only and does not send a message.</p>
+    <p id="status" role="status">Sign in to load the test lead.</p>
+    <form id="login">
+      <label>Email <input id="email" type="email" autocomplete="username" required></label>
+      <label>Password <input id="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Sign in</button>
+    </form>
+    <section id="desk" hidden>
+      <button id="sign-out" type="button">Sign out</button>
+      <div id="leads"></div>
+    </section>
+  </main>
+  <script src="config.js"></script>
+  <script>
+    const status = document.querySelector('#status');
+    const login = document.querySelector('#login');
+    const desk = document.querySelector('#desk');
+    const leads = document.querySelector('#leads');
+    const config = window.PCC_SALES_PUBLIC || null;
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+    let session = null;
+
+    function say(message) { status.textContent = message; }
+
+    async function api(route, options = {}) {
+      const headers = {
+        apikey: config.key,
+        Authorization: `Bearer ${options.token || config.key}`,
+        ...(options.body ? { 'Content-Type': 'application/json', 'Content-Profile': 'pcc_sales', Prefer: 'return=representation' } : { 'Accept-Profile': 'pcc_sales' }),
+      };
+      const response = await fetch(`${config.url}/rest/v1/${route}`, { method: options.method || 'GET', headers, body: options.body ? JSON.stringify(options.body) : undefined });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.message || 'That request was denied.');
+      return body;
+    }
+
+    async function load() {
+      const businesses = await api('businesses?select=pcc_business_id,name,assigned_to,record_origin&record_origin=eq.disposable_test&pcc_business_id=gte.900000000', { token: session.access_token });
+      const follows = await api('follow_ups?select=pcc_business_id,local_key,due_on,revision,responsible', { token: session.access_token });
+      const rows = (businesses || []).filter(row => Number(row.pcc_business_id) >= 900000000);
+      leads.innerHTML = rows.length ? rows.map(row => {
+        const follow = (follows || []).find(item => Number(item.pcc_business_id) === Number(row.pcc_business_id) && item.responsible === 'will') || {};
+        return `<article><b>${esc(row.name)}</b><p>Assigned ${esc(row.assigned_to || 'unassigned')}</p><label>Follow-up date <input data-date="${esc(row.pcc_business_id)}" type="date" value="${esc(follow.due_on || '')}"></label><button type="button" data-save="${esc(row.pcc_business_id)}" data-key="${esc(follow.local_key || '')}" data-revision="${esc(follow.revision || 1)}">Save follow-up</button></article>`;
+      }).join('') : '<p>No disposable test lead is assigned.</p>';
+      leads.querySelectorAll('[data-save]').forEach(button => {
+        button.onclick = async () => {
+          const id = button.getAttribute('data-save');
+          const key = button.getAttribute('data-key');
+          const revision = Number(button.getAttribute('data-revision') || 1);
+          const due = leads.querySelector(`[data-date="${id}"]`).value;
+          if (!key || Number(id) < 900000000) return say('Only a disposable test lead can be changed here.');
+          try {
+            await api(`follow_ups?pcc_business_id=eq.${id}&local_key=eq.${encodeURIComponent(key)}`, {
+              method: 'PATCH',
+              token: session.access_token,
+              body: { due_on: due, revision: revision + 1 },
+            });
+            say('Follow-up date saved. Nothing was sent.');
+            await load();
+          } catch (error) { say(error.message); }
+        };
+      });
+      say(rows.length ? 'Test leads loaded. Nothing is sent from this desk.' : 'No disposable test lead is visible for this account.');
+    }
+
+    login.onsubmit = async event => {
+      event.preventDefault();
+      if (!config?.url || !config?.key) return say('This desk is not configured.');
+      say('Signing in.');
+      const response = await fetch(`${config.url}/auth/v1/token?grant_type=password`, {
+        method: 'POST',
+        headers: { apikey: config.key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: document.querySelector('#email').value, password: document.querySelector('#password').value }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.access_token) return say('Sign-in was not accepted.');
+      const role = body.user?.app_metadata?.pcc_role;
+      if (role !== 'owner' && role !== 'sales') return say('This account cannot open the sales desk.');
+      session = body;
+      login.hidden = true;
+      desk.hidden = false;
+      document.querySelector('#password').value = '';
+      try { await load(); } catch (error) { say(error.message); }
+    };
+
+    document.querySelector('#sign-out').onclick = () => {
+      session = null;
+      leads.innerHTML = '';
+      desk.hidden = true;
+      login.hidden = false;
+      say('Signed out.');
+    };
+  </script>
+</body>
+</html>
